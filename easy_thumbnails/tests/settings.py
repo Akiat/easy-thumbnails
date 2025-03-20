@@ -14,6 +14,8 @@ DATABASES = {
     }
 }
 
+DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
+
 INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sites',
@@ -25,6 +27,16 @@ INSTALLED_APPS = [
     'easy_thumbnails.optimize',
     'easy_thumbnails.tests.apps.EasyThumbnailsTestConfig',
 ]
+
+
+STORAGES = {
+    "easy_thumbnails": {
+        "BACKEND": "easy_thumbnails.tests.utils.TemporaryStorage",
+    },
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+}
 
 TEMPLATES = [
     {

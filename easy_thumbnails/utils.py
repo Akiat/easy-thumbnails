@@ -2,8 +2,10 @@ import hashlib
 import inspect
 import math
 
-from django.utils.functional import LazyObject
 from django.utils import timezone
+from django.utils.functional import LazyObject
+from django.utils.module_loading import import_string
+
 from PIL import Image
 from easy_thumbnails.conf import settings
 
@@ -21,19 +23,6 @@ def image_entropy(im):
     return -sum([p * math.log(p, 2) for p in hist if p != 0])
 
 
-def dynamic_import(import_string):
-    """
-    Dynamically import a module or object.
-    """
-    # Use rfind rather than rsplit for Python 2.3 compatibility.
-    lastdot = import_string.rfind('.')
-    if lastdot == -1:
-        return __import__(import_string, {}, {}, [])
-    module_name, attr = import_string[:lastdot], import_string[lastdot + 1:]
-    parent_module = __import__(module_name, {}, {}, [attr])
-    return getattr(parent_module, attr)
-
-
 def valid_processor_options(processors=None):
     """
     Return a list of unique valid options for a list of image processors
@@ -41,7 +30,7 @@ def valid_processor_options(processors=None):
     """
     if processors is None:
         processors = [
-            dynamic_import(p) for p in
+            import_string(p) for p in
             tuple(settings.THUMBNAIL_PROCESSORS) +
             tuple(settings.THUMBNAIL_SOURCE_GENERATORS)]
     valid_options = set(['size', 'quality', 'subsampling'])
@@ -76,7 +65,7 @@ def get_storage_hash(storage):
     if not isinstance(storage, str):
         storage_cls = storage.__class__
         storage = '%s.%s' % (storage_cls.__module__, storage_cls.__name__)
-    return hashlib.md5(storage.encode('utf8')).hexdigest()
+    return md5_not_used_for_security(storage.encode('utf8')).hexdigest()
 
 
 def is_transparent(image):
@@ -105,6 +94,14 @@ def exif_orientation(im):
     """
     Rotate and/or flip an image to respect the image's EXIF orientation data.
     """
+    # Check Pillow version and use right constant
+    try:
+        # Pillow >= 9.1.0
+        Image__Transpose = Image.Transpose
+    except AttributeError:
+        # Pillow < 9.1.0
+        Image__Transpose = Image
+
     try:
         exif = im._getexif()
     except Exception:
@@ -114,19 +111,21 @@ def exif_orientation(im):
     if exif:
         orientation = exif.get(0x0112)
         if orientation == 2:
-            im = im.transpose(Image.FLIP_LEFT_RIGHT)
+            im = im.transpose(Image__Transpose.FLIP_LEFT_RIGHT)
         elif orientation == 3:
-            im = im.transpose(Image.ROTATE_180)
+            im = im.transpose(Image__Transpose.ROTATE_180)
         elif orientation == 4:
-            im = im.transpose(Image.FLIP_TOP_BOTTOM)
+            im = im.transpose(Image__Transpose.FLIP_TOP_BOTTOM)
         elif orientation == 5:
-            im = im.transpose(Image.ROTATE_270).transpose(Image.FLIP_LEFT_RIGHT)
+            im = im.transpose(Image__Transpose.ROTATE_270) \
+                   .transpose(Image__Transpose.FLIP_LEFT_RIGHT)
         elif orientation == 6:
-            im = im.transpose(Image.ROTATE_270)
+            im = im.transpose(Image__Transpose.ROTATE_270)
         elif orientation == 7:
-            im = im.transpose(Image.ROTATE_90).transpose(Image.FLIP_LEFT_RIGHT)
+            im = im.transpose(Image__Transpose.ROTATE_90) \
+                   .transpose(Image__Transpose.FLIP_LEFT_RIGHT)
         elif orientation == 8:
-            im = im.transpose(Image.ROTATE_90)
+            im = im.transpose(Image__Transpose.ROTATE_90)
     return im
 
 
@@ -146,3 +145,19 @@ def get_modified_time(storage, name):
             default_timezone = timezone.get_default_timezone()
             return timezone.make_aware(modified_time, default_timezone)
     return modified_time
+
+def md5_not_used_for_security(data):
+    """
+    Calculate a md5 hash of the given data, but explicitly mark it as not
+    being used for security purposes. Without this flag FIPS compliant
+    systems will raise an exception when used.
+    """
+    return hashlib.new('md5', data, usedforsecurity=False)
+
+def sha1_not_used_for_security(data):
+    """
+    Calculate a sha1 hash of the given data, but explicitly mark it as not
+    being used for security purposes. Without the flag FIPS compliant
+    systems will raise an exception when used.
+    """
+    return hashlib.new('sha1', data, usedforsecurity=False)

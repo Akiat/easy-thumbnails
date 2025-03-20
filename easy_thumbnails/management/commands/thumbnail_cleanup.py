@@ -1,12 +1,16 @@
 import gc
 import os
 import time
-from datetime import datetime, date, timedelta
+from datetime import date
 
-from django.core.files.storage import get_storage_class
 from django.core.management.base import BaseCommand
+from django.utils.timezone import datetime, timedelta
+
 from easy_thumbnails.conf import settings
 from easy_thumbnails.models import Source
+from easy_thumbnails.storage import get_storage
+from easy_thumbnails.utils import get_storage_hash
+from django.core.files.storage import storages
 
 
 class ThumbnailCollectionCleaner:
@@ -19,8 +23,15 @@ class ThumbnailCollectionCleaner:
     source_refs_deleted = 0
     execution_time = 0
 
-    def _get_absolute_path(self, path):
-        return os.path.join(settings.MEDIA_ROOT, path)
+    def __init__(self, stdout, stderr):
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def _get_absolute_path(self, path, storage):
+        if hasattr(storage, 'location'):
+            return os.path.join(storage.location, path)
+        else:
+            return os.path.join(settings.MEDIA_ROOT, path)
 
     def _get_relative_path(self, path):
         return os.path.relpath(path, settings.MEDIA_ROOT)
@@ -29,8 +40,8 @@ class ThumbnailCollectionCleaner:
         try:
             return storage.exists(path)
         except Exception as e:
-            print("Something went wrong when checking existance of %s:" % path)
-            print(str(e))
+            self.stderr.write("Something went wrong when checking existance of {}:".format(path))
+            self.stderr.write(e)
 
     def _delete_sources_by_id(self, ids):
         Source.objects.all().filter(id__in=ids).delete()
@@ -43,11 +54,12 @@ class ThumbnailCollectionCleaner:
         database references).
         """
         if dry_run:
-            print ("Dry run...")
+            self.stdout.write("Dry run...")
 
         if not storage:
-            storage = get_storage_class(settings.THUMBNAIL_DEFAULT_STORAGE)()
+            storage = get_storage()
 
+        storage_hash_map = {get_storage_hash(storages[alias]): alias for alias in settings.STORAGES.keys()}
         sources_to_delete = []
         time_start = time.time()
 
@@ -60,24 +72,31 @@ class ThumbnailCollectionCleaner:
             query = query.filter(name__startswith=cleanup_path)
 
         for source in queryset_iterator(query):
-            self.sources += 1
-            abs_source_path = self._get_absolute_path(source.name)
+            source_storage_alias = storage_hash_map.get(source.storage_hash)
+            source_storage = storages[source_storage_alias] if source_storage_alias else None
+            if not source_storage:
+                self.stdout.write(f"Source storage hash ({source.storage_hash}) not found in STORAGES")
+                self.stdout.write("Can't determine source storage, skipping source")
+                continue
 
-            if not self._check_if_exists(storage, abs_source_path):
+            self.sources += 1
+            abs_source_path = self._get_absolute_path(source.name, source_storage)
+
+            if not self._check_if_exists(source_storage, abs_source_path):
                 if verbosity > 0:
-                    print ("Source not present:", abs_source_path)
+                    self.stdout.write("Source not present: {}".format(abs_source_path))
                 self.source_refs_deleted += 1
                 sources_to_delete.append(source.id)
 
                 for thumb in source.thumbnails.all():
                     self.thumbnails_deleted += 1
-                    abs_thumbnail_path = self._get_absolute_path(thumb.name)
+                    abs_thumbnail_path = self._get_absolute_path(thumb.name, storage)
 
                     if self._check_if_exists(storage, abs_thumbnail_path):
                         if not dry_run:
                             storage.delete(abs_thumbnail_path)
                         if verbosity > 0:
-                            print ("Deleting thumbnail:", abs_thumbnail_path)
+                            self.stdout.write("Deleting thumbnail: {}".format(abs_thumbnail_path))
 
             if len(sources_to_delete) >= 1000 and not dry_run:
                 self._delete_sources_by_id(sources_to_delete)
@@ -91,14 +110,14 @@ class ThumbnailCollectionCleaner:
         """
         Print statistics about the cleanup performed.
         """
-        print(
-            "{0:-<48}".format(str(datetime.now().strftime('%Y-%m-%d %H:%M '))))
-        print("{0:<40} {1:>7}".format("Sources checked:", self.sources))
-        print("{0:<40} {1:>7}".format(
+        self.stdout.write(
+            "{0:-<48}".format(datetime.now().strftime('%Y-%m-%d %H:%M ')))
+        self.stdout.write("{0:<40} {1:>7}".format("Sources checked:", self.sources))
+        self.stdout.write("{0:<40} {1:>7}".format(
             "Source references deleted from DB:", self.source_refs_deleted))
-        print("{0:<40} {1:>7}".format("Thumbnails deleted from disk:",
+        self.stdout.write("{0:<40} {1:>7}".format("Thumbnails deleted from disk:",
                                     self.thumbnails_deleted))
-        print("(Completed in %s seconds)\n" % self.execution_time)
+        self.stdout.write("(Completed in {} seconds)\n".format(self.execution_time))
 
 
 def queryset_iterator(queryset, chunksize=1000):
@@ -142,7 +161,7 @@ class Command(BaseCommand):
             help='Specify a path to clean up.')
 
     def handle(self, *args, **options):
-        tcc = ThumbnailCollectionCleaner()
+        tcc = ThumbnailCollectionCleaner(self.stdout, self.stderr)
         tcc.clean_up(
             dry_run=options.get('dry_run', False),
             verbosity=int(options.get('verbosity', 1)),
